@@ -1,0 +1,303 @@
+const int buttonPin = 2;
+const int RledPin = 3;
+const int GledPin = 4;
+const int BledPin = 5;
+
+const unsigned long interval = 1500;
+
+unsigned long intervalStart = 0;
+
+int clickCount = 0;
+int lastButtonState = HIGH;
+
+const unsigned long blinkInterval = 500;
+
+unsigned long blinkStart = 0;
+
+bool ledState = false;
+
+int currentColor = 0;
+
+// false = click-counting mode
+// true  = serial-controlled mode
+bool serialMode = false;
+
+
+void setColor(int color)
+{
+  digitalWrite(RledPin, HIGH);
+  digitalWrite(GledPin, HIGH);
+  digitalWrite(BledPin, HIGH);
+
+  switch (color)
+  {
+    case 0:
+      // OFF
+      break;
+
+    case 1:
+      // RED
+      digitalWrite(RledPin, LOW);
+      break;
+
+    case 2:
+      // GREEN
+      digitalWrite(GledPin, LOW);
+      break;
+
+    case 3:
+      // BLUE
+      digitalWrite(BledPin, LOW);
+      break;
+
+    case 4:
+      // YELLOW
+      digitalWrite(RledPin, LOW);
+      digitalWrite(GledPin, LOW);
+      break;
+
+    case 5:
+      // PURPLE
+      digitalWrite(RledPin, LOW);
+      digitalWrite(BledPin, LOW);
+      break;
+
+    case 6:
+      // CYAN
+      digitalWrite(GledPin, LOW);
+      digitalWrite(BledPin, LOW);
+      break;
+
+    case 7:
+      // WHITE
+      digitalWrite(RledPin, LOW);
+      digitalWrite(GledPin, LOW);
+      digitalWrite(BledPin, LOW);
+      break;
+  }
+}
+
+
+void updateBlink()
+{
+  if (currentColor == 0)
+  {
+    setColor(0);
+    return;
+  }
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - blinkStart >= blinkInterval)
+  {
+    blinkStart = currentMillis;
+
+    ledState = !ledState;
+
+    if (ledState)
+    {
+      setColor(currentColor);
+    }
+    else
+    {
+      setColor(0);
+    }
+  }
+}
+
+
+
+void changeColor(int color)
+{
+  currentColor = color;
+
+  blinkStart = millis();
+
+  ledState = true;
+
+  setColor(currentColor);
+}
+
+
+void printColor(int color)
+{
+  switch (color)
+  {
+    case 0: Serial.println("Color: OFF"); break;
+    case 1: Serial.println("Color: RED"); break;
+    case 2: Serial.println("Color: GREEN"); break;
+    case 3: Serial.println("Color: BLUE"); break;
+    case 4: Serial.println("Color: YELLOW"); break;
+    case 5: Serial.println("Color: PURPLE"); break;
+    case 6: Serial.println("Color: CYAN"); break;
+    case 7: Serial.println("Color: WHITE"); break;
+  }
+}
+
+
+void checkSerial()
+{
+  if (Serial.available() > 0)
+  {
+    String command = Serial.readStringUntil('\n');
+
+    command.trim();
+    command.toLowerCase();
+
+    if (command == "auto")
+    {
+      serialMode = false;
+      clickCount = 0;
+      intervalStart = millis();
+
+      Serial.println("Automatic click-counting mode");
+      return;
+    }
+
+
+    if (command == "off")
+    {
+      serialMode = true;
+      changeColor(0);
+      printColor(0);
+    }
+    else if (command == "red")
+    {
+      serialMode = true;
+      changeColor(1);
+      printColor(1);
+    }
+    else if (command == "green")
+    {
+      serialMode = true;
+      changeColor(2);
+      printColor(2);
+    }
+    else if (command == "blue")
+    {
+      serialMode = true;
+      changeColor(3);
+      printColor(3);
+    }
+    else if (command == "yellow")
+    {
+      serialMode = true;
+      changeColor(4);
+      printColor(4);
+    }
+    else if (command == "purple")
+    {
+      serialMode = true;
+      changeColor(5);
+      printColor(5);
+    }
+    else if (command == "cyan")
+    {
+      serialMode = true;
+      changeColor(6);
+      printColor(6);
+    }
+    else if (command == "white")
+    {
+      serialMode = true;
+      changeColor(7);
+      printColor(7);
+    }
+
+
+    else if (command.length() == 1 &&
+             command[0] >= '0' &&
+             command[0] <= '7')
+    {
+      int color = command.toInt();
+
+      serialMode = true;
+      changeColor(color);
+      printColor(color);
+    }
+
+    else
+    {
+      Serial.println("Invalid command.");
+      Serial.println("Use: red, green, blue, yellow, purple, cyan, white");
+      Serial.println("Or: 0-7");
+      Serial.println("Type 'auto' for click-counting mode.");
+    }
+  }
+}
+
+
+void setup()
+{
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  pinMode(RledPin, OUTPUT);
+  pinMode(GledPin, OUTPUT);
+  pinMode(BledPin, OUTPUT);
+
+  setColor(0);
+
+  Serial.begin(9600);
+
+  intervalStart = millis();
+  blinkStart = millis();
+
+  Serial.println("RGB LED Controller");
+  Serial.println("------------------");
+  Serial.println("Click the button to select a color.");
+  Serial.println("1 click  = RED");
+  Serial.println("2 clicks = GREEN");
+  Serial.println("3 clicks = BLUE");
+  Serial.println("4 clicks = YELLOW");
+  Serial.println("5 clicks = PURPLE");
+  Serial.println("6 clicks = CYAN");
+  Serial.println("7 clicks = WHITE");
+  Serial.println("0 clicks = OFF");
+  Serial.println();
+  Serial.println("Serial commands: red, green, blue, yellow,");
+  Serial.println("purple, cyan, white, off, or 0-7");
+  Serial.println("Type 'auto' to return to click mode.");
+}
+
+
+void loop()
+{
+  // Check Serial Monitor
+  checkSerial();
+
+  updateBlink();
+
+  int buttonState = digitalRead(buttonPin);
+
+  if (buttonState == LOW && lastButtonState == HIGH)
+  {
+    clickCount++;
+
+    Serial.print("Click count: ");
+    Serial.println(clickCount);
+
+    delay(30);
+  }
+
+  lastButtonState = buttonState;
+
+
+  if (!serialMode && millis() - intervalStart >= interval)
+  {
+    Serial.print("Clicks in 1.5 second: ");
+    Serial.println(clickCount);
+
+    int color = clickCount;
+
+    if (color > 7)
+    {
+      color = 7;
+    }
+
+    changeColor(color);
+    printColor(color);
+
+    clickCount = 0;
+    intervalStart = millis();
+  }
+}
