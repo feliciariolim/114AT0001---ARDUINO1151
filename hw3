@@ -1,0 +1,206 @@
+
+const int buttonPin = 2;
+const int redPin = 9;
+const int greenPin = 10;
+const int bluePin = 11;
+
+// Modes:
+// 0 = Constant
+// 1 = Blink
+// 2 = Breathing
+// 3 = Rainbow
+// 4 = Heartbeat
+
+int mode = 0;
+int colorIndex = 0;
+
+const unsigned long longPressTime = 600;
+const unsigned long blinkInterval = 500;
+const unsigned long fadeInterval = 10;
+
+const int colors[][3] = {
+  {0, 255, 255},       // Red
+  {255, 0, 255},       // Green
+  {255, 255, 0},       // Blue
+  {0, 255, 0},     // Purple
+  {255, 0, 0},     // Cyan
+  {0, 0, 255},     // Yellow
+  {0, 0, 0}    // White
+};
+
+const int totalColors = 7;
+
+bool lastButtonState = HIGH;
+bool longPressHandled = false;
+bool ledOn = true;
+
+unsigned long pressStart = 0;
+unsigned long lastBlink = 0;
+unsigned long lastFade = 0;
+
+int brightness = 0;
+int fadeDirection = 1;
+
+void setup() {
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  pinMode(redPin, OUTPUT);
+  pinMode(greenPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
+
+  Serial.begin(9600);
+  Serial.println("Light Stick Ready!");
+}
+
+void loop() {
+  checkButton();
+  updateLight();
+}
+
+void checkButton() {
+  bool buttonState = digitalRead(buttonPin);
+  unsigned long now = millis();
+
+  if (lastButtonState == HIGH && buttonState == LOW) {
+    pressStart = now;
+    longPressHandled = false;
+  }
+
+  // Long press: switch mode
+  if (buttonState == LOW &&
+      !longPressHandled &&
+      now - pressStart >= longPressTime) {
+
+    mode = (mode + 1) % 5;
+    longPressHandled = true;
+
+    brightness = 0;
+    fadeDirection = 1;
+    ledOn = true;
+    lastBlink = now;
+
+    Serial.print("Mode: ");
+    switch (mode) {
+      case 0: Serial.println("Constant"); break;
+      case 1: Serial.println("Blink"); break;
+      case 2: Serial.println("Breathing"); break;
+      case 3: Serial.println("Rainbow"); break;
+      case 4: Serial.println("Heartbeat"); break;
+    }
+  }
+
+  // Short press: change color
+  if (lastButtonState == LOW && buttonState == HIGH) {
+    if (!longPressHandled) {
+      colorIndex = (colorIndex + 1) % totalColors;
+      Serial.print("Color index: ");
+      Serial.println(colorIndex);
+    }
+  }
+
+  lastButtonState = buttonState;
+}
+
+void updateLight() {
+  unsigned long now = millis();
+
+  // Mode 1: Constant light
+  if (mode == 0) {
+    setColor(255);
+  }
+
+  // Mode 2: Blink
+  else if (mode == 1) {
+    if (now - lastBlink >= blinkInterval) {
+      lastBlink = now;
+      ledOn = !ledOn;
+    }
+
+    setColor(ledOn ? 255 : 0);
+  }
+
+  // Mode 3: Breathing
+  else if (mode == 2) {
+    if (now - lastFade >= fadeInterval) {
+      lastFade = now;
+      brightness += fadeDirection * 3;
+
+      if (brightness >= 255) {
+        brightness = 255;
+        fadeDirection = -1;
+      }
+
+      if (brightness <= 0) {
+        brightness = 0;
+        fadeDirection = 1;
+      }
+    }
+
+    setColor(brightness);
+  }
+
+  // Mode 4: Rainbow
+  else if (mode == 3) {
+    int hue = (now / 8) % 768;
+    rainbowColor(hue);
+  }
+
+  // Mode 5: Heartbeat
+  else if (mode == 4) {
+    unsigned long t = now % 1400;
+    int beatBrightness = 0;
+
+    if (t < 180) {
+      // First heartbeat
+      beatBrightness = (t < 90)
+        ? map(t, 0, 90, 0, 255)
+        : map(t, 90, 180, 255, 0);
+    }
+    else if (t >= 260 && t < 420) {
+      // Second heartbeat
+      unsigned long p = t - 260;
+      beatBrightness = (p < 70)
+        ? map(p, 0, 70, 0, 255)
+        : map(p, 70, 160, 255, 0);
+    }
+
+    setColor(beatBrightness);
+  }
+}
+
+void setColor(int level) {
+  analogWrite(redPin,
+    colors[colorIndex][0] * level / 255);
+
+  analogWrite(greenPin,
+    colors[colorIndex][1] * level / 255);
+
+  analogWrite(bluePin,
+    colors[colorIndex][2] * level / 255);
+}
+
+void rainbowColor(int hue) {
+  int r, g, b;
+
+  if (hue < 256) {
+    r = 255 - hue;
+    g = hue;
+    b = 0;
+  }
+  else if (hue < 512) {
+    hue -= 256;
+    r = 0;
+    g = 255 - hue;
+    b = hue;
+  }
+  else {
+    hue -= 512;
+    r = hue;
+    g = 0;
+    b = 255 - hue;
+  }
+
+  analogWrite(redPin, r);
+  analogWrite(greenPin, g);
+  analogWrite(bluePin, b);
+}
