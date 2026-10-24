@@ -1,0 +1,453 @@
+const int RledPin    = 9;
+const int GledPin    = 10;
+const int BledPin    = 11;
+const int petPin     = 2;    // pet button
+const int lightPin   = A0;   // LDR
+
+const bool COMMON_ANODE = false;
+
+// ----------------------------- MOOD -----------------------------
+const int MOOD_MIN     = 0;
+const int MOOD_MAX     = 20;
+const int neutralMood  = 10;
+
+int   mood        = neutralMood;   // the real mood value (points)
+float displayMood = neutralMood;   // smoothed value used for the LED colour
+
+// ----------------------------- TIMING ---------------------------
+const unsigned long IDLE_BEFORE_SAD   = 5000;  // 5 s untouched -> sad
+const unsigned long DECAY_INTERVAL    = 1000;  // -1 per second
+const unsigned long DEBOUNCE_MS       = 30;
+const unsigned long FLASH_MS          = 120;   // pet flash length
+
+unsigned long lastPetTime   = 0;
+unsigned long lastDecayTime = 0;
+unsigned long lastBoostTime = 0;   // for personalities that gain mood from light
+unsigned long flashUntil    = 0;
+
+// --------------------------- PET BUTTON -------------------------
+int           lastPetReading  = HIGH;
+int           petState        = HIGH;
+unsigned long lastPetChange   = 0;
+
+// --------------------------- SERIAL INPUT -----------------------
+char          cmdBuf[24];
+byte          cmdLen        = 0;
+unsigned long lastSerialByte = 0;
+
+// --------------------------- LIGHT ------------------------------
+const bool LIGHT_SENSOR_INVERTED = true;
+
+const int VERY_DARK_LEVEL = 120;
+const int DARK_LEVEL      = 500;
+const int BRIGHT_LEVEL    = 700;
+
+enum LightLevel { VERY_DARK, DARK, NORMAL_LIGHT, BRIGHT };
+
+float        lightSmooth  = 500;       // low-pass filtered reading
+LightLevel   lightLevel   = NORMAL_LIGHT;
+unsigned long darkSince   = 0;         // when it became dark (0 = not dark)
+
+// --------------------------- PERSONALITY ------------------------
+enum Personality {
+  P_NORMAL,         // standard toy, mildly reacts to dark
+  P_AFRAID_DARK,    // afraid of the dark: drains very fast, loves comfort
+  P_LOVES_DARK,     // loves darkness: dark makes it happy, bright annoys it
+  P_SLEEPY,         // falls asleep in the dark, wakes when petted / lit
+  P_EXCITED,        // gets excited under bright light
+  P_COUNT
+};
+Personality personality = P_NORMAL;
+
+const char* personalityName(Personality p) {
+  switch (p) {
+    case P_NORMAL:      return "Normal";
+    case P_AFRAID_DARK: return "Afraid of the dark";
+    case P_LOVES_DARK:  return "Loves darkness";
+    case P_SLEEPY:      return "Sleepy";
+    case P_EXCITED:     return "Excited by light";
+    default:            return "?";
+  }
+}
+
+bool sleeping = false;
+
+// ------------------------- PROTOTYPES ---------------------------
+void handlePetButton(unsigned long now);
+void handleSerial(unsigned long now);
+void readLight(unsigned long now);
+void updateSleep(unsigned long now);
+void updateMood(unsigned long now);
+void updateDisplayMood();
+void renderLED(unsigned long now);
+void petToy(unsigned long now);
+void changeMood(int delta);
+void printHelp();
+void setPersonality(Personality p);
+void runCommand(char* cmd);
+void writeRGB(float r, float g, float b);
+void moodToColor(float m, float &r, float &g, float &b);
+float wave(unsigned long now, unsigned long periodMs);
+void startupAnimation();
+void blinkPersonality();
+
+// ============================ SETUP ============================
+void setup() {
+  pinMode(RledPin, OUTPUT);
+  pinMode(GledPin, OUTPUT);
+  pinMode(BledPin, OUTPUT);
+  pinMode(petPin,  INPUT_PULLUP);
+
+  Serial.begin(9600);
+
+  startupAnimation();
+
+  unsigned long now = millis();
+  lastPetTime   = now;
+  lastDecayTime = now;
+  lastBoostTime = now;
+  lightSmooth   = analogRead(lightPin);
+
+  Serial.print("Toy ready. Personality: ");
+  Serial.println(personalityName(personality));
+  printHelp();
+}
+
+// ============================ LOOP =============================
+void loop() {
+  unsigned long now = millis();
+
+  readLight(now);
+  handlePetButton(now);
+  handleSerial(now);
+  updateSleep(now);
+  updateMood(now);
+  updateDisplayMood();
+  renderLED(now);
+}
+
+// ========================= INPUTS ==============================
+
+// Pet button with debounce; reacts once per press (falling edge)
+void handlePetButton(unsigned long now) {
+  int reading = digitalRead(petPin);
+  if (reading != lastPetReading) lastPetChange = now;
+
+  if (now - lastPetChange > DEBOUNCE_MS && reading != petState) {
+    petState = reading;
+    if (petState == LOW) petToy(now);
+  }
+  lastPetReading = reading;
+}
+
+// ---------------- Serial Monitor control ----------------
+
+void printHelp() {
+  Serial.println(F("--- Commands ---"));
+  Serial.println(F("0/normal  1/afraid  2/loves  3/sleepy  4/excited"));
+  Serial.println(F("next | mood N | status | help"));
+}
+
+void setPersonality(Personality p) {
+  personality = p;
+  sleeping = false;
+  unsigned long now = millis();
+  lastPetTime = lastDecayTime = lastBoostTime = now;
+  Serial.print(F("Personality -> "));
+  Serial.println(personalityName(personality));
+  blinkPersonality();
+}
+
+void runCommand(char* cmd) {
+  // lowercase
+  for (char* c = cmd; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
+
+  if      (!strcmp(cmd, "0") || !strcmp(cmd, "normal"))  setPersonality(P_NORMAL);
+  else if (!strcmp(cmd, "1") || !strcmp(cmd, "afraid"))  setPersonality(P_AFRAID_DARK);
+  else if (!strcmp(cmd, "2") || !strcmp(cmd, "loves"))   setPersonality(P_LOVES_DARK);
+  else if (!strcmp(cmd, "3") || !strcmp(cmd, "sleepy"))  setPersonality(P_SLEEPY);
+  else if (!strcmp(cmd, "4") || !strcmp(cmd, "excited")) setPersonality(P_EXCITED);
+  else if (!strcmp(cmd, "next"))
+    setPersonality((Personality)((personality + 1) % P_COUNT));
+  else if (!strncmp(cmd, "mood ", 5)) {
+    mood = constrain(atoi(cmd + 5), MOOD_MIN, MOOD_MAX);
+    lastPetTime = millis();
+    Serial.print(F("Mood set to ")); Serial.println(mood);
+  }
+  else if (!strcmp(cmd, "status")) {
+    Serial.print(F("Personality: ")); Serial.println(personalityName(personality));
+    Serial.print(F("Mood: "));        Serial.println(mood);
+    Serial.print(F("Light: "));       Serial.println((int)lightSmooth);
+    Serial.print(F("Sleeping: "));    Serial.println(sleeping);
+  }
+  else if (!strcmp(cmd, "help")) printHelp();
+  else { Serial.print(F("Unknown command: ")); Serial.println(cmd); printHelp(); }
+}
+
+// Collects characters from the Serial Monitor.
+void handleSerial(unsigned long now) {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    lastSerialByte = millis();
+
+    if (c == '\n' || c == '\r') {
+      if (cmdLen > 0) {
+        while (cmdLen > 0 && (cmdBuf[cmdLen - 1] == ' ' || cmdBuf[cmdLen - 1] == '\\t')) cmdLen--;  // trim end
+        cmdBuf[cmdLen] = '\0';
+        cmdLen = 0;
+        if (cmdBuf[0] != '\0') runCommand(cmdBuf);
+      }
+      continue;
+    }
+
+    if (c == ' ' && cmdLen == 0) continue;
+
+    if (cmdLen == 0 && c >= '0' && c <= '4') {
+      cmdBuf[0] = c;
+      cmdBuf[1] = '\0';
+      runCommand(cmdBuf);
+      continue;
+    }
+
+    if (cmdLen < sizeof(cmdBuf) - 1) {
+      cmdBuf[cmdLen++] = c;
+    }
+  }
+
+  if (cmdLen > 0 && millis() - lastSerialByte > 150) {
+    while (cmdLen > 0 && (cmdBuf[cmdLen - 1] == ' ' || cmdBuf[cmdLen - 1] == '\\t')) cmdLen--;      // trim end
+    cmdBuf[cmdLen] = '\0';
+    cmdLen = 0;
+    if (cmdBuf[0] != '\0') runCommand(cmdBuf);
+  }
+}
+
+void readLight(unsigned long now) {
+  int raw = analogRead(lightPin);
+  if (LIGHT_SENSOR_INVERTED) raw = 1023 - raw;
+  lightSmooth = lightSmooth * 0.9 + raw * 0.1;   // low-pass filter
+
+  if      (lightSmooth < VERY_DARK_LEVEL) lightLevel = VERY_DARK;
+  else if (lightSmooth < DARK_LEVEL)      lightLevel = DARK;
+  else if (lightSmooth > BRIGHT_LEVEL)    lightLevel = BRIGHT;
+  else                                    lightLevel = NORMAL_LIGHT;
+
+  bool isDark = (lightLevel == DARK || lightLevel == VERY_DARK);
+  if (isDark && darkSince == 0)  darkSince = now;
+  if (!isDark)                   darkSince = 0;
+
+  static unsigned long lastPrint = 0;
+  if (now - lastPrint > 1000) {
+    lastPrint = now;
+    Serial.print("mood=");   Serial.print(mood);
+    Serial.print("  light="); Serial.print((int)lightSmooth);
+    Serial.print("  level="); Serial.print(lightLevel);
+    Serial.print("  sleeping="); Serial.println(sleeping);
+  }
+}
+
+// ========================= BEHAVIOUR ===========================
+void changeMood(int delta) {
+  mood = constrain(mood + delta, MOOD_MIN, MOOD_MAX);
+}
+
+void petToy(unsigned long now) {
+  lastPetTime = now;
+  flashUntil  = now + FLASH_MS;
+
+  int gain = 1;
+  // Comforting bonus: an afraid toy is extra relieved when petted in the dark
+  bool isDark = (lightLevel == DARK || lightLevel == VERY_DARK);
+  if (personality == P_AFRAID_DARK && isDark) gain = 2;
+
+  if (sleeping) {               // petting wakes a sleeping toy
+    sleeping = false;
+    Serial.println("Toy woke up!");
+  }
+  changeMood(gain);
+}
+
+// Sleepy personality: falls asleep after 3 s of darkness
+void updateSleep(unsigned long now) {
+  if (personality != P_SLEEPY) { sleeping = false; return; }
+
+  bool darkLongEnough = (darkSince != 0 && now - darkSince > 3000);
+  if (darkLongEnough && !sleeping) {
+    sleeping = true;
+    Serial.println("Toy fell asleep (zzz)");
+  }
+  if (lightLevel == NORMAL_LIGHT || lightLevel == BRIGHT) {
+    if (sleeping) Serial.println("Toy woke up (light)");
+    sleeping = false;
+  }
+}
+
+// All mood rules live here
+void updateMood(unsigned long now) {
+  if (sleeping) {               // sleeping toys keep their mood
+    lastDecayTime = now;
+    return;
+  }
+
+  // ---- 1. Basic rule: untouched for 5 s -> -1 per second ----
+  unsigned long decayInterval = DECAY_INTERVAL;
+  bool idleSad = (now - lastPetTime > IDLE_BEFORE_SAD);
+
+  // ---- 2. Light-based drain ----
+  bool dark     = (lightLevel == DARK || lightLevel == VERY_DARK);
+  bool darkLong = dark && darkSince != 0 && (now - darkSince > 3000);
+  bool darkDrain = false;
+
+  switch (personality) {
+    case P_NORMAL:
+    case P_EXCITED:
+      if (lightLevel == VERY_DARK)  { decayInterval = 500;  darkDrain = true; } // -2 / s
+      else if (darkLong)            { decayInterval = 700;  darkDrain = true; } // faster
+      break;
+
+    case P_AFRAID_DARK:
+      if (lightLevel == VERY_DARK)  { decayInterval = 350;  darkDrain = true; }
+      else if (dark)                { decayInterval = 600;  darkDrain = true; }
+      break;
+
+    case P_LOVES_DARK:
+      // Darkness boosts mood and never drains it; BRIGHT light annoys it.
+      if (lightLevel == BRIGHT)     { decayInterval = 800;  darkDrain = true; }
+      break;
+
+    case P_SLEEPY:
+      break; // handled by sleeping state
+
+    default:
+      break;
+  }
+
+  // Excited toy loses mood faster when idle
+  if (personality == P_EXCITED) decayInterval = decayInterval * 3 / 4;
+
+  // A toy that loves darkness should gain mood there, not lose it just because it has not been petted. Bright light can still drain its mood.
+  bool idleDecay = idleSad && !(personality == P_LOVES_DARK && dark);
+  bool shouldDecay = idleDecay || darkDrain;
+
+  if (shouldDecay && now - lastDecayTime >= decayInterval) {
+    lastDecayTime = now;
+    changeMood(-1);
+  } else if (!shouldDecay) {
+    // Keep the timer fresh whenever no decay condition is active.
+    lastDecayTime = now;
+  }
+
+  // ---- 3. Light that makes the toy HAPPY (personalities) ----
+  if (now - lastBoostTime >= 2000) {
+    if (personality == P_LOVES_DARK && dark) {
+      lastBoostTime = now;
+      changeMood(+1);
+    } else if (personality == P_EXCITED && lightLevel == BRIGHT) {
+      lastBoostTime = now;
+      changeMood(+1);
+    }
+  }
+}
+
+// Ease the displayed value toward the real mood -> smooth colour fades
+void updateDisplayMood() {
+  displayMood += ((float)mood - displayMood) * 0.08;
+  if (abs(displayMood - mood) < 0.01) displayMood = mood;
+}
+
+// ========================= LED OUTPUT ==========================
+
+// Raw output, handles common anode and clamps 0-255
+void writeRGB(float r, float g, float b) {
+  int ri = constrain((int)r, 0, 255);
+  int gi = constrain((int)g, 0, 255);
+  int bi = constrain((int)b, 0, 255);
+  if (COMMON_ANODE) { ri = 255 - ri; gi = 255 - gi; bi = 255 - bi; }
+  analogWrite(RledPin, ri);
+  analogWrite(GledPin, gi);
+  analogWrite(BledPin, bi);
+}
+
+// Colour spectrum from the slides: 0 = red, 10 = green, 20 = blue
+void moodToColor(float m, float &r, float &g, float &b) {
+  const float step = 255.0 / 10.0;          // brightnessInterval
+  if (m >= neutralMood) {
+    r = 0;
+    g = 255 - step * (m - neutralMood);
+    b = step * (m - neutralMood);
+  } else {
+    r = step * (neutralMood - m);
+    g = 255 - step * (neutralMood - m);
+    b = 0;
+  }
+}
+
+// Smooth 0..1 sine wave with a given period (ms)
+float wave(unsigned long now, unsigned long periodMs) {
+  float phase = (float)(now % periodMs) / (float)periodMs * TWO_PI;
+  return 0.5 + 0.5 * sinf(phase);
+}
+
+// Applies mood colour + behaviour effects
+void renderLED(unsigned long now) {
+  float r, g, b;
+  moodToColor(displayMood, r, g, b);
+
+  float scale = 1.0;
+
+  if (sleeping) {
+    // Sleeping: very dim, slow breathing
+    scale = 0.04 + 0.16 * wave(now, 4000);
+  }
+  else if (mood >= 18) {
+    // Very happy: fast joyful pulse
+    scale = 0.55 + 0.45 * wave(now, 500);
+  }
+  else if (mood <= 3) {
+    // Very sad: slow, weak breathing
+    scale = 0.25 + 0.55 * wave(now, 2500);
+  }
+  else if (personality == P_EXCITED && lightLevel == BRIGHT) {
+    // Excited under bright light: quick shimmer
+    scale = 0.6 + 0.4 * wave(now, 250);
+  }
+  else if (personality == P_AFRAID_DARK &&
+           (lightLevel == DARK || lightLevel == VERY_DARK)) {
+    // Scared: nervous flicker
+    scale = 0.5 + 0.5 * wave(now, 180);
+  }
+
+  r *= scale; g *= scale; b *= scale;
+
+  // Pet flash: brief white-ish burst so the user sees the touch registered
+  if (now < flashUntil) {
+    r = r * 0.4 + 255 * 0.6;
+    g = g * 0.4 + 255 * 0.6;
+    b = b * 0.4 + 255 * 0.6;
+  }
+
+  writeRGB(r, g, b);
+}
+
+// ========================= ANIMATIONS ==========================
+void startupAnimation() {
+  for (int m = 0; m <= MOOD_MAX; m++) {
+    float r, g, b;
+    moodToColor(m, r, g, b);
+    writeRGB(r, g, b);
+    delay(80);
+  }
+  for (int m = MOOD_MAX; m >= neutralMood; m--) {
+    float r, g, b;
+    moodToColor(m, r, g, b);
+    writeRGB(r, g, b);
+    delay(60);
+  }
+}
+
+void blinkPersonality() {
+  for (int i = 0; i <= (int)personality; i++) {
+    writeRGB(255, 255, 255); delay(150);
+    writeRGB(0, 0, 0);       delay(150);
+  }
+}
